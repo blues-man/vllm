@@ -2,7 +2,7 @@
 
 FROM ubuntu:22.04 AS cpu-test-1
 
-ENV CCACHE_DIR=/root/.cache/ccache
+ENV CCACHE_DIR=/home/ubuntu/.cache/ccache
 
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -15,10 +15,15 @@ RUN --mount=type=cache,target=/var/cache/apt \
 # https://intel.github.io/intel-extension-for-pytorch/cpu/latest/tutorials/performance_tuning/tuning_guide.html
 # intel-openmp provides additional performance improvement vs. openmp
 # tcmalloc provides better memory allocation efficiency, e.g, holding memory in caches to speed up access of commonly-used objects.
-RUN --mount=type=cache,target=/root/.cache/pip \
+
+RUN useradd -rm -d /home/ubuntu -s /bin/bash -g root -G sudo -u 1001 ubuntu
+USER ubuntu
+#WORKDIR /home/ubuntu
+
+RUN --mount=type=cache,uid=1001,gid=0,target=/home/ubuntu/.cache/pip \
     pip install intel-openmp==2025.0.1
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so"
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4"
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
@@ -26,9 +31,11 @@ RUN pip install intel_extension_for_pytorch==2.5.0
 
 WORKDIR /workspace
 
+ENV PATH="$PATH:/home/ubuntu/.local/bin"
+
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/home/ubuntu/.cache/pip \
     --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
@@ -37,7 +44,11 @@ FROM cpu-test-1 AS build
 
 WORKDIR /workspace/vllm
 
-RUN --mount=type=cache,target=/root/.cache/pip \
+USER ubuntu
+
+ENV PATH="$PATH:/home/ubuntu/.local/bin:/home/ubuntu/.local/lib/python3.10/site-packages/"
+
+RUN --mount=type=cache,uid=1001,gid=0,target=/home/ubuntu/.cache/pip \
     --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
     --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
     pip install -v -r requirements-cpu.txt
@@ -51,10 +62,22 @@ RUN --mount=type=bind,source=.git,target=.git \
 ARG VLLM_CPU_DISABLE_AVX512
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/ccache \
+USER root
+
+RUN chown -R ubuntu:0 /workspace \
+    && chmod -R g+rwX /workspace \
+    && chown -R ubuntu:0 /home/ubuntu/ \
+    && chmod -R g+rwX /home/ubuntu
+
+USER ubuntu
+
+RUN --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel
+
+
+RUN --mount=type=cache,uid=1001,gid=0,target=/home/ubuntu/.cache/pip \
+    --mount=type=cache,uid=1001,gid=0,target=/home/ubuntu/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
     pip install dist/*.whl && \
     rm -rf dist
 
@@ -63,7 +86,10 @@ WORKDIR /workspace/
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,uid=1001,gid=0,target=/home/ubuntu/.cache/pip \
     pip install -e tests/vllm_test_utils
+
+ENV XDG_CACHE_HOME="/home/ubuntu/.cache/"
+ENV PYTHONPATH="/home/ubuntu/.local/lib/python3.10/site-packages/":"${PYTHONPATH}"
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
